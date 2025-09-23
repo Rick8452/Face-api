@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    container_name: face-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=America/Mexico_City
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    external: true 
