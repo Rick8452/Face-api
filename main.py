@@ -365,32 +365,67 @@ async def finalize_registration(user_id: str = Form(...)):
     return {"status": "saved", "user_id": user_id}
 
 # ----------------- Verificación (comparar contra usuario guardado) -----------------
-THRESHOLD = 0.58  # ajusta según pruebas (0.45-0.6 típico HOG)
+THRESHOLD = 0.35  # ajusta según pruebas (0.45-0.6 típico HOG)
 
 @app.post("/verify_frame")
 async def verify_frame(user_id: str = Form(...), file: Optional[UploadFile] = File(None), imagen: Optional[UploadFile] = File(None)):
-    upload = file or imagen
-    if upload is None:
-        return JSONResponse(content={"status": "no_file"}, status_code=400)
-    contenido = await upload.read()
-    if not contenido:
-        return JSONResponse(content={"status": "no_file"}, status_code=400)
+    """Verificación biométrica con mejor manejo de errores"""
+    try:
+        print(f"=== INICIO VERIFICACIÓN PARA USUARIO {user_id} ===")
+        
+        upload = file or imagen
+        if upload is None:
+            print("Error: No se recibió archivo")
+            return JSONResponse(content={"status": "no_file"}, status_code=400)
+        
+        contenido = await upload.read()
+        if not contenido:
+            print("Error: Archivo vacío")
+            return JSONResponse(content={"status": "no_file"}, status_code=400)
 
-    ref = _load_user_vector(user_id)
-    if ref is None:
-        return JSONResponse(content={"status": "no_reference"}, status_code=404)
+        # Cargar vector de referencia
+        print("Cargando vector de referencia...")
+        ref = _load_user_vector(user_id)
+        if ref is None:
+            print(f"No se encontró vector para usuario {user_id}")
+            # Listar archivos disponibles para debug
+            import glob, os
+            files = glob.glob(os.path.join(DATA_DIR, "*.json"))
+            print(f"Archivos disponibles: {[os.path.basename(f) for f in files]}")
+            return JSONResponse(content={"status": "no_reference"}, status_code=404)
 
-    img = _load_image_as_bgr_from_bytes(contenido)
-    if img is None:
-        return JSONResponse(content={"status": "bad_image"}, status_code=400)
+        print("Vector de referencia cargado exitosamente")
 
-    vec = _get_face_vector(img)
-    if vec is None:
-        return {"status": "no_face"}
+        img = _load_image_as_bgr_from_bytes(contenido)
+        if img is None:
+            print("Error: No se pudo decodificar la imagen")
+            return JSONResponse(content={"status": "bad_image"}, status_code=400)
 
-    # usa la distancia de face_recognition (euclídea en embeddings)
-    dist = float(face_recognition.face_distance([np.array(ref, dtype=np.float32)], vec)[0])
-    return {"status": "ok", "user_id": user_id, "distance": dist, "threshold": THRESHOLD, "match": bool(dist < THRESHOLD)}
+        vec = _get_face_vector(img)
+        if vec is None:
+            print("Error: No se pudo extraer vector facial de la imagen")
+            return {"status": "no_face"}
+
+        # Calcular distancia
+        dist = float(face_recognition.face_distance([np.array(ref, dtype=np.float32)], vec)[0])
+        match = bool(dist < THRESHOLD)
+        
+        print(f"Verificación completada. Distancia: {dist:.4f}, Match: {match}")
+        
+        return {
+            "status": "ok", 
+            "user_id": user_id, 
+            "distance": dist, 
+            "threshold": THRESHOLD, 
+            "match": match
+        }
+        
+    except Exception as e:
+        print(f"Error en verificación: {str(e)}")
+        return JSONResponse(
+            content={"status": "error", "message": str(e)},
+            status_code=500
+        )
 
 # ----------------- Gestión de usuarios -----------------
 @app.get("/users")
@@ -419,6 +454,54 @@ def health_check():
         "timestamp": time.time(),
         "current_pose": current_pose,
         "poses_captured": sum(1 for k in progress if progress[k] is not None)
+    }
+
+@app.post("/save_vector")
+async def save_vector(user_id: str = Form(...), vector: str = Form(...)):
+    """Endpoint para guardar un vector directamente desde NestJS"""
+    try:
+        print(f"=== GUARDANDO VECTOR PARA USUARIO {user_id} ===")
+        
+        # Convertir el string JSON a lista de floats
+        vector_list = json.loads(vector)
+        print(f"Vector recibido. Longitud: {len(vector_list)}")
+        
+        # Validar que sea un vector válido
+        if not isinstance(vector_list, list) or len(vector_list) != 128:
+            return JSONResponse(
+                content={"status": "error", "message": "Vector inválido"},
+                status_code=400
+            )
+        
+        # Guardar el vector
+        _save_user_vector(user_id, vector_list)
+        print(f"Vector guardado exitosamente para usuario {user_id}")
+        
+        return {"status": "saved", "user_id": user_id}
+        
+    except json.JSONDecodeError:
+        return JSONResponse(
+            content={"status": "error", "message": "Vector en formato JSON inválido"},
+            status_code=400
+        )
+    except Exception as e:
+        print(f"Error al guardar vector: {str(e)}")
+        return JSONResponse(
+            content={"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+@app.get("/check_user/{user_id}")
+def check_user(user_id: str):
+    """Endpoint para verificar si un usuario tiene vector guardado"""
+    vector = _load_user_vector(user_id)
+    if vector is None:
+        return {"exists": False, "message": "Usuario no encontrado"}
+    
+    return {
+        "exists": True, 
+        "user_id": user_id, 
+        "vector_length": len(vector) if vector else 0
     }
 
 @app.post("/debug_pose")
@@ -471,6 +554,8 @@ async def debug_pose(file: UploadFile = File(...)):
     except Exception as e:
         print(f" Error en debug_pose: {str(e)}")
         return {"error": str(e)}
+    
+    
 
 if __name__ == "__main__":
     import uvicorn
