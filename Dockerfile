@@ -5,23 +5,29 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Instala dependencias del sistema necesarias (ajusta según tu proyecto)
+# Dependencias de sistema necesarias para OpenCV/dlib en runtime (y para compilar si hiciera falta)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
- && rm -rf /var/lib/apt/lists/*
+    libglib2.0-0 libsm6 libxext6 libxrender1 \
+    libgl1 || apt-get install -y --no-install-recommends libgl1-mesa-glx; \
+    apt-get install -y --no-install-recommends build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copia requirements.txt y instala paquetes Python
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# Instala deps en un venv
+COPY requirements.txt /app/requirements.txt
+RUN python -m venv /app/.venv \
+    && /app/.venv/bin/pip install --upgrade pip \
+    && /app/.venv/bin/pip install --no-cache-dir -r /app/requirements.txt
 
-# Copia la app
+# Copia el código
 COPY . /app
 
-# Carpeta para datos persistentes
-RUN mkdir -p /app/data/users
+# Carpeta de datos
+RUN mkdir -p /app/data/users /app/data/ocr
 
 EXPOSE 8000
 
-# Arranca uvicorn directamente
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Usa el Python del venv para lanzar uvicorn
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
