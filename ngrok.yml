@@ -1,0 +1,12 @@
+version: "3"
+
+agent:
+  authtoken: 33ZmHVtfdGf3Xw7s2wtnOx6ec3e_6fUPVbHyMe2rqyJrhmRog
+
+tunnels:
+  faceapi:
+    proto: http
+    addr: face-api:8000
+    schemes:
+      - https
+    inspect: false

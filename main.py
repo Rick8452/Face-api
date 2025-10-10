@@ -365,7 +365,7 @@ async def finalize_registration(user_id: str = Form(...)):
     return {"status": "saved", "user_id": user_id}
 
 # ----------------- Verificación (comparar contra usuario guardado) -----------------
-THRESHOLD = 0.35  # ajusta según pruebas (0.45-0.6 típico HOG)
+THRESHOLD = 0.58  # ajusta según pruebas (0.45-0.6 típico HOG)
 
 @app.post("/verify_frame")
 async def verify_frame(user_id: str = Form(...), file: Optional[UploadFile] = File(None), imagen: Optional[UploadFile] = File(None)):
