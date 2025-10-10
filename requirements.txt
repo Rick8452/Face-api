@@ -1,5 +1,14 @@
 fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
-python-dotenv
+uvicorn[standard]
+numpy
+opencv-python-headless
+Pillow>=9.5,<12
+python-multipart
+# --- biometría ---
+dlib
+face-recognition
+# --- OCR ---
+python-doctr
+pypdfium2
+rapidfuzz
+Unidecode
