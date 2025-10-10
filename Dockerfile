@@ -8,12 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Crea directorio de trabajo
 WORKDIR /app
 
-RUN echo 'APT::Update::Post-Invoke-Success:: "";' > /etc/apt/apt.conf.d/99no-clean \
+RUN echo 'APT::Update::Post-Invoke:: "";' > /etc/apt/apt.conf.d/99no-clean \
+ && echo 'APT::Update::Post-Invoke-Success:: "";' >> /etc/apt/apt.conf.d/99no-clean \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
  && rm -rf /var/lib/apt/lists/*
+
 
 # Copia el requirements y lo instala con pip
 COPY requirements.txt .
