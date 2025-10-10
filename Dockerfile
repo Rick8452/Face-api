@@ -8,6 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Crea directorio de trabajo
 WORKDIR /app
 
+RUN echo 'APT::Update::Post-Invoke-Success:: "";' > /etc/apt/apt.conf.d/99no-clean \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+ 
 # Instala dependencias del sistema si las necesitas
 # (por ejemplo, para psycopg2, PIL, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
