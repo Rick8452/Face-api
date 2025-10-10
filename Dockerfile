@@ -1,33 +1,24 @@
-FROM conda/c3i-linux-64
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+# Imagen base con conda (multi-arch: arm64/amd64)
+FROM conda/c3i-linux-64:latest
+# Evita prompts interactivos en conda
+ENV CONDA_ALWAYS_YES=true \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-
+# Crea carpeta de la app
 WORKDIR /app
-
-# Dependencias de sistema necesarias para OpenCV/dlib en runtime (y para compilar si hiciera falta)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 \
-    libgl1 || apt-get install -y --no-install-recommends libgl1-mesa-glx; \
-    apt-get install -y --no-install-recommends build-essential cmake \
-    && rm -rf /var/lib/apt/lists/*
-
-# Instala deps en un venv
-COPY requirements.txt /app/requirements.txt
-RUN python -m venv /app/.venv \
-    && /app/.venv/bin/pip install --upgrade pip \
-    && /app/.venv/bin/pip install --no-cache-dir -r /app/requirements.txt
-
-# Copia el código
+# Copia y crea el entorno conda
+COPY environment.yml /app/
+RUN conda env create -f /app/environment.yml && conda clean -afy
+# Asegura que el PATH use el entorno "fr"
+SHELL ["bash", "-lc"]
+RUN echo "conda activate fr" >> ~/.bashrc
+ENV PATH /opt/conda/envs/fr/bin:$PATH
+# Copia tu app
 COPY . /app
-
-# Carpeta de datos
-RUN mkdir -p /app/data/users /app/data/ocr
-
+# Crea carpeta de datos (persistiremos por volumen)
+RUN mkdir -p /app/data/users
+# Exponer puerto
 EXPOSE 8000
-
-# Usa el Python del venv para lanzar uvicorn
-ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
-
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Comando de arranque (uvicorn usando el entorno "fr")
+CMD ["bash", "-lc", "uvicorn main:app --host 0.0.0.0 --port 8000"]
