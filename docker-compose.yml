@@ -13,25 +13,6 @@ services:
       - app-network
 
 
-  ngrok:
-    image: ngrok/ngrok:latest
-    container_name: ngrok-faceapi
-    depends_on:
-      - api
-    # Arranca con el archivo de config v3
-    command: start --all --config /etc/ngrok.yml
-    environment:
-      # aquí REFERENCIAS una variable de entorno normal
-      - NGROK_AUTHTOKEN=33ZmHVtfdGf3Xw7s2wtnOx6ec3e_6fUPVbHyMe2rqyJrhmRog
-    volumes:
-      - ./ngrok.yml:/etc/ngrok.yml:ro
-    # (opcional) expón la UI local del inspector en un puerto libre de tu Mac
-    ports:
-      - "14040:4040"
-    networks:
-      - app-network
-    restart: unless-stopped
-
 networks:
   app-network:
     external: true 
