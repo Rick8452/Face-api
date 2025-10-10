@@ -1,0 +1,33 @@
+stages:
+  - build
+
+variables:
+  IMAGE_TAG: latest
+  AWS_REGION: $AWS_DEFAULT_REGION
+  ECR_URI: "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY_NAME"
+  CLUSTER_NAME: $CLUSTER_NAME
+  SERVICE_NAME: $SERVICE_NAME
+  TASK_DEFINITION: $TASK_DEFINITION
+
+before_script:
+  - apk add --no-cache curl jq python3 py3-pip aws-cli
+  - aws --version
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:19.03.12-dind
+  script:
+    - echo "Building Docker image"
+    - docker build -t $ECR_URI:$IMAGE_TAG . 
+    - docker images 
+    - echo "Logging into Amazon ECR"
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_URI
+    - docker push $ECR_URI:$IMAGE_TAG
+    - echo "Deploying to ECS"
+    - aws --version
+    - aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME
+    - aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $TASK_DEFINITION --force-new-deployment
+  only:
+    - main
