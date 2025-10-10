@@ -1,35 +1,32 @@
-# Imagen base con conda (multi-arch: arm64/amd64)
-FROM condaforge/miniforge3:latest
+# Imagen base de Python
+FROM python:3.11-slim
 
-# Evita prompts interactivos en conda
-ENV CONDA_ALWAYS_YES=true \
-    PYTHONDONTWRITEBYTECODE=1 \
+# Desactiva bytecode + buffer de logs
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Crea carpeta de la app
+# Crea directorio de trabajo
 WORKDIR /app
 
-# Copia el environment
-COPY environment.yml /app/
+# Instala dependencias del sistema si las necesitas
+# (por ejemplo, para psycopg2, PIL, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-# Instala mamba y crea el entorno
-RUN conda install -n base -c conda-forge mamba \
- && mamba env create -f /app/environment.yml \
- && conda clean -afy
+# Copia el requirements y lo instala con pip
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Asegura que el PATH use el entorno "fr"
-SHELL ["bash", "-lc"]
-RUN echo "conda activate fr" >> ~/.bashrc
-ENV PATH /opt/conda/envs/fr/bin:$PATH
-
-# Copia tu app
+# Copia tu código
 COPY . /app
 
-# Crea carpeta de datos (persistiremos por volumen)
+# Crea carpeta persistente
 RUN mkdir -p /app/data/users
 
 # Exponer puerto
 EXPOSE 8000
 
-# Comando de arranque (uvicorn usando el entorno "fr")
-CMD ["bash", "-lc", "uvicorn main:app --host 0.0.0.0 --port 8000"]
+# Comando de arranque
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
