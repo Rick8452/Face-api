@@ -12,9 +12,10 @@ WORKDIR /app
 # Copia y crea el entorno conda
 COPY environment.yml /app/
 #RUN conda env create -f /app/environment.yml && conda clean -afy
-RUN conda config --set solver classic \
+RUN echo "solver: classic" > ~/.condarc \
  && CONDA_NO_PLUGINS=true conda env create --quiet -f /app/environment.yml \
  && conda clean -afy
+
 
 
 # Asegura que el PATH use el entorno "fr"
