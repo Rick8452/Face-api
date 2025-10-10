@@ -13,7 +13,7 @@ WORKDIR /app
 COPY environment.yml /app/
 #RUN conda env create -f /app/environment.yml && conda clean -afy
 RUN conda config --set solver classic \
- && conda env create -f /app/environment.yml \
+ && CONDA_NO_PLUGINS=true conda env create --quiet -f /app/environment.yml \
  && conda clean -afy
 
 
