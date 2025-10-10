@@ -9,14 +9,13 @@ ENV CONDA_ALWAYS_YES=true \
 # Crea carpeta de la app
 WORKDIR /app
 
-# Copia y crea el entorno conda
+# Copia el environment
 COPY environment.yml /app/
-#RUN conda env create -f /app/environment.yml && conda clean -afy
-RUN echo "solver: classic" > ~/.condarc \
- && CONDA_NO_PLUGINS=true conda env create --quiet -f /app/environment.yml \
+
+# Instala mamba y crea el entorno
+RUN conda install -n base -c conda-forge mamba \
+ && mamba env create -f /app/environment.yml \
  && conda clean -afy
-
-
 
 # Asegura que el PATH use el entorno "fr"
 SHELL ["bash", "-lc"]
