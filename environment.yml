@@ -1,0 +1,16 @@
+name: fr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - dlib
+  - openblas
+  - pip
+  - pip:
+      - fastapi
+      - "uvicorn[standard]"
+      - numpy
+      - opencv-python-headless
+      - "Pillow>=9.5,<12"
+      - python-multipart
+      - face-recognition

@@ -1,34 +1,27 @@
-# Imagen base de Python
 FROM python:3.11-slim
 
-# Desactiva bytecode + buffer de logs
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Crea directorio de trabajo
 WORKDIR /app
 
-RUN echo 'APT::Update::Post-Invoke:: "";' > /etc/apt/apt.conf.d/99no-clean \
- && echo 'APT::Update::Post-Invoke-Success:: "";' >> /etc/apt/apt.conf.d/99no-clean \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
+# Instala dependencias del sistema necesarias (ajusta según tu proyecto)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
  && rm -rf /var/lib/apt/lists/*
 
+# Copia requirements.txt y instala paquetes Python
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia el requirements y lo instala con pip
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
-# Copia tu código
+# Copia la app
 COPY . /app
 
-# Crea carpeta persistente
+# Carpeta para datos persistentes
 RUN mkdir -p /app/data/users
 
-# Exponer puerto
 EXPOSE 8000
 
-# Comando de arranque
+# Arranca uvicorn directamente
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
