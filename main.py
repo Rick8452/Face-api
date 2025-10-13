@@ -1,12 +1,22 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from db import init_mongo, close_mongo
 import cv2, numpy as np, face_recognition, time, json, os
 from typing import Optional
 from PIL import Image, ImageOps
 import io
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_mongo(app)
+    yield
+    await close_mongo()
+
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # ajusta si quieres restringir
@@ -25,37 +35,62 @@ HOLD_TIME = 2  # s
 DATA_DIR = "data/users"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-def _save_user_vector(user_id: str, vector: list[float]):
-    path = os.path.join(DATA_DIR, f"{user_id}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"user_id": user_id, "vector": vector}, f, ensure_ascii=False)
 
-def _load_user_vector(user_id: str) -> Optional[list[float]]:
-    path = os.path.join(DATA_DIR, f"{user_id}.json")
+async def save_user_vector(app: FastAPI, usuarioID: str, vector: list[float]):
+    col = getattr(app.state, "mongo_col", None)
+    if col is None:
+        _save_user_vector(usuarioID, vector)
+        return
+
+    await col.update_one(
+        {"usuarioID": usuarioID},
+        {"$set": {"usuarioID": usuarioID, "vector": vector}},
+        upsert=True,
+    )
+
+    path = os.path.join(DATA_DIR, f"{usuarioID}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"usuarioID": usuarioID, "vector": vector}, f, ensure_ascii=False)
+
+
+async def _load_user_vector(app: FastAPI, usuarioID: str) -> Optional[list[float]]:
+
+    path = os.path.join(DATA_DIR, f"{usuarioID}.json")
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data.get("vector")
+        return data.get("vector")
+
+    col = getattr(app.state, "mongo_col", None)
+    if col is None:
+        return _load_user_vector(usuarioID)
+
+    doc = await col.find_one({"usuarioID": usuarioID}, {"_id": 0, "vector": 1})
+    return (doc or {}).get("vector")
+
 
 # ----------------- Utilidades de imagen -----------------
 def _rotationMatrixToEulerAngles(R: np.ndarray):
-    sy = np.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
+    sy = np.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
     singular = sy < 1e-6
     if not singular:
-        x = np.arctan2(R[2,1], R[2,2])  # roll
-        y = np.arctan2(-R[2,0], sy)     # pitch
-        z = np.arctan2(R[1,0], R[0,0])  # yaw
+        x = np.arctan2(R[2, 1], R[2, 2])  # roll
+        y = np.arctan2(-R[2, 0], sy)  # pitch
+        z = np.arctan2(R[1, 0], R[0, 0])  # yaw
     else:
-        x = np.arctan2(-R[1,2], R[1,1]); y = np.arctan2(-R[2,0], sy); z = 0
+        x = np.arctan2(-R[1, 2], R[1, 1])
+        y = np.arctan2(-R[2, 0], sy)
+        z = 0
     return x, y, z
+
 
 def _estimate_pitch_yaw(img_bgr: np.ndarray):
     print("=== INICIO ESTIMACIÓN POSE ===")
-    
+
     # Probar tanto la imagen original como la volteada
     img_bgr_flipped = cv2.flip(img_bgr, 1)
-    
+
     # Procesar imagen volteada (que suele dar mejores resultados)
     img_rgb = cv2.cvtColor(img_bgr_flipped, cv2.COLOR_BGR2RGB)
     boxes = face_recognition.face_locations(img_rgb, model="hog")
@@ -68,12 +103,12 @@ def _estimate_pitch_yaw(img_bgr: np.ndarray):
         if not boxes:
             print(" No se detectaron caras en ninguna imagen")
             return None, None
-    
+
     landmarks_list = face_recognition.face_landmarks(img_rgb)
-    if not landmarks_list: 
+    if not landmarks_list:
         print(" No se pudieron detectar landmarks")
         return None, None
-        
+
     lm = landmarks_list[0]
     print(" Landmarks detectados correctamente")
 
@@ -97,7 +132,7 @@ def _estimate_pitch_yaw(img_bgr: np.ndarray):
             if not landmarks_list:
                 return None, None
             lm = landmarks_list[0]
-            
+
             # Recalcular puntos con imagen original
             nose_tip = np.mean(lm["nose_tip"], axis=0)
             chin = lm["chin"][8]
@@ -105,96 +140,171 @@ def _estimate_pitch_yaw(img_bgr: np.ndarray):
             right_eye_corner = lm["right_eye"][3]
 
         mouth_points = np.array(lm["top_lip"] + lm["bottom_lip"])
-        left_mouth_corner = mouth_points[np.argmin(mouth_points[:,0])]
-        right_mouth_corner = mouth_points[np.argmax(mouth_points[:,0])]
-        image_points = np.array([
-            nose_tip, chin, left_eye_corner, right_eye_corner,
-            left_mouth_corner, right_mouth_corner
-        ], dtype=np.float64)
-        
+        left_mouth_corner = mouth_points[np.argmin(mouth_points[:, 0])]
+        right_mouth_corner = mouth_points[np.argmax(mouth_points[:, 0])]
+        image_points = np.array(
+            [
+                nose_tip,
+                chin,
+                left_eye_corner,
+                right_eye_corner,
+                left_mouth_corner,
+                right_mouth_corner,
+            ],
+            dtype=np.float64,
+        )
+
     except Exception as e:
         print(f" Error al extraer landmarks: {e}")
         return None, None
-        
-    model_points = np.array([
-        (0.0,0.0,0.0),(0.0,-330.0,-65.0),(-225.0,170.0,-135.0),(225.0,170.0,-135.0),
-        (-150.0,-150.0,-125.0),(150.0,-150.0,-125.0)
-    ], dtype=np.float64)
-    
-    h,w = img_rgb.shape[:2]
+
+    model_points = np.array(
+        [
+            (0.0, 0.0, 0.0),
+            (0.0, -330.0, -65.0),
+            (-225.0, 170.0, -135.0),
+            (225.0, 170.0, -135.0),
+            (-150.0, -150.0, -125.0),
+            (150.0, -150.0, -125.0),
+        ],
+        dtype=np.float64,
+    )
+
+    h, w = img_rgb.shape[:2]
     print(f"Dimensiones imagen: {w}x{h}")
     focal_length = w
-    camera_matrix = np.array([
-        [focal_length, 0, w/2],
-        [0, focal_length, h/2],
-        [0, 0, 1]
-    ], dtype=np.float64)
-    
-    dist_coeffs = np.zeros((4,1))
-    success, rvec, tvec = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
-    
-    if not success: 
+    camera_matrix = np.array(
+        [[focal_length, 0, w / 2], [0, focal_length, h / 2], [0, 0, 1]],
+        dtype=np.float64,
+    )
+
+    dist_coeffs = np.zeros((4, 1))
+    success, rvec, tvec = cv2.solvePnP(
+        model_points,
+        image_points,
+        camera_matrix,
+        dist_coeffs,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+
+    if not success:
         print("solvePnP falló")
         return None, None
-        
-    R,_ = cv2.Rodrigues(rvec)
+
+    R, _ = cv2.Rodrigues(rvec)
     roll, pitch, yaw = _rotationMatrixToEulerAngles(R)
     pitch_deg = float(np.degrees(pitch))
     yaw_deg = float(np.degrees(yaw))
     roll_deg = float(np.degrees(roll))
-    
-    print(f" Ángulos calculados - Roll: {roll_deg:.2f}°, Pitch: {pitch_deg:.2f}°, Yaw: {yaw_deg:.2f}°")
+
+    print(
+        f" Ángulos calculados - Roll: {roll_deg:.2f}°, Pitch: {pitch_deg:.2f}°, Yaw: {yaw_deg:.2f}°"
+    )
 
     return pitch_deg, yaw_deg
+
 
 def _correct_yaw_angle(yaw: float) -> float:
     """Corrige ángulos de yaw fuera de rango normal"""
     if yaw is None:
         return 0.0
-    
+
     yaw_normalized = yaw % 360
     if yaw_normalized > 180:
         yaw_normalized -= 360
-    
+
     if abs(yaw_normalized) > 90:
         if yaw_normalized > 0:
             yaw_normalized -= 180
         else:
             yaw_normalized += 180
-    
+
     return yaw_normalized
+
+
+# --- helpers de archivos (fallback) ---
+def _save_user_vector_file(
+    usuarioID: str, vector: list[float], data_dir: str = DATA_DIR
+):
+    path = os.path.join(data_dir, f"{usuarioID}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"usuarioID": usuarioID, "vector": vector}, f, ensure_ascii=False)
+
+
+def _load_user_vector_file(
+    usuarioID: str, data_dir: str = DATA_DIR
+) -> Optional[list[float]]:
+    path = os.path.join(data_dir, f"{usuarioID}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("vector")
+
+
+# --- helpers Mongo con fallback a archivos ---
+async def save_user_vector(app: FastAPI, usuarioID: str, vector: list[float]):
+    col = getattr(app.state, "mongo_col", None)
+    if col is not None:
+        await col.update_one(
+            {"usuarioID": usuarioID},
+            {"$set": {"usuarioID": usuarioID, "vector": vector}},
+            upsert=True,
+        )
+        # Si quieres DUAL-write (opcional), descomenta:
+        # _save_user_vector_file(usuarioID, vector)
+        return
+    # Fallback a archivos
+    _save_user_vector_file(usuarioID, vector)
+
+
+async def load_user_vector(app: FastAPI, usuarioID: str) -> Optional[list[float]]:
+    col = getattr(app.state, "mongo_col", None)
+    if col is not None:
+        doc = await col.find_one({"usuarioID": usuarioID}, {"_id": 0, "vector": 1})
+        if doc and "vector" in doc:
+            return doc["vector"]
+        # si no está en Mongo, intenta archivo como último recurso
+        return _load_user_vector_file(usuarioID)
+    # Fallback a archivos
+    return _load_user_vector_file(usuarioID)
 
 
 def _classify_pose(pitch: float, yaw: float) -> str | None:
     print(f" Clasificando pose - Pitch: {pitch:.2f}, Yaw: {yaw:.2f}")
-    
-    # Corregir yaw primero
+
     yaw_corrected = _correct_yaw_angle(yaw)
     print(f" Yaw original: {yaw:.2f}°, Yaw corregido: {yaw_corrected:.2f}°")
-    
-    YAW_THRESHOLD = 25  
-    PITCH_THRESHOLD = 15  
-    
-    
+
+    YAW_THRESHOLD = 25
+    PITCH_THRESHOLD = 15
+    PITCH_THRESHOLD_UP = -15  # <= -15  → up
+    PITCH_THRESHOLD_DOWN = 15  # >= +15  → down
+
     is_tilt_pose = abs(pitch) >= PITCH_THRESHOLD
-    yaw_threshold = YAW_THRESHOLD * (1.5 if is_tilt_pose else 1) 
-    
+    yaw_threshold = YAW_THRESHOLD * (1.5 if is_tilt_pose else 1)
+
     if abs(yaw_corrected) > yaw_threshold:
-        print(f" Yaw corregido excede umbral: {abs(yaw_corrected):.2f} > {yaw_threshold}")
+        print(
+            f" Yaw corregido excede umbral: {abs(yaw_corrected):.2f} > {yaw_threshold}"
+        )
         return None
-        
-    if pitch <= -PITCH_THRESHOLD:
+
+    if pitch <= PITCH_THRESHOLD_UP:
         print(" Pose clasificada: up")
         return "up"
-        
-    if pitch >= PITCH_THRESHOLD:
+
+    if pitch >= PITCH_THRESHOLD_DOWN:
         print(" Pose clasificada: down")
         return "down"
-        
+
     print(" Pose clasificada: front")
     return "front"
 
-def _load_image_as_bgr_from_bytes(bytes_data: bytes, max_width: int = 900) -> np.ndarray | None:
+
+def _load_image_as_bgr_from_bytes(
+    bytes_data: bytes, max_width: int = 900
+) -> np.ndarray | None:
     try:
         pil = Image.open(io.BytesIO(bytes_data)).convert("RGB")
         pil = ImageOps.exif_transpose(pil)
@@ -207,28 +317,35 @@ def _load_image_as_bgr_from_bytes(bytes_data: bytes, max_width: int = 900) -> np
         nparr = np.frombuffer(bytes_data, np.uint8)
         return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
+
 def _get_face_vector(img_bgr: np.ndarray):
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     boxes = face_recognition.face_locations(img_rgb, model="hog")
-    if not boxes: 
+    if not boxes:
         print(" No se detectaron caras para extraer vector")
         return None
     enc = face_recognition.face_encodings(img_rgb, boxes)
-    if not enc: 
+    if not enc:
         print(" No se pudieron extraer encodings faciales")
         return None
     print(f" Vector facial extraído. Longitud: {len(enc[0])}")
     return enc[0]  # numpy array (128,)
 
+
 def _to_list(vec: np.ndarray) -> list[float]:
     return [float(x) for x in vec.tolist()]
 
+
 def _normalize(v: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(v);  return v if n==0 else v/n
+    n = np.linalg.norm(v)
+    return v if n == 0 else v / n
+
 
 # ----------------- Endpoints de captura guiada -----------------
 @app.post("/analyze_frame")
-async def analyze_frame(file: Optional[UploadFile] = File(None), imagen: Optional[UploadFile] = File(None)):
+async def analyze_frame(
+    file: Optional[UploadFile] = File(None), imagen: Optional[UploadFile] = File(None)
+):
     """Acepta 'file' o 'imagen' como campo multipart."""
     print("=== INICIO ANALYZE_FRAME ===")
     global current_pose
@@ -236,7 +353,7 @@ async def analyze_frame(file: Optional[UploadFile] = File(None), imagen: Optiona
     if upload is None:
         print(" Error: No se recibió archivo")
         return JSONResponse(content={"status": "no_file"}, status_code=400)
-    
+
     contenido = await upload.read()
     if not contenido:
         print("Error: Archivo vacío")
@@ -253,13 +370,14 @@ async def analyze_frame(file: Optional[UploadFile] = File(None), imagen: Optiona
 
     # Calcular yaw corregido para la respuesta
     yaw_corrected = _correct_yaw_angle(yaw) if yaw is not None else yaw
-    
+
     pose = _classify_pose(pitch, yaw)
     now = time.time()
 
     if pose is None:
         current_pose = None
-        for k in timestamps: timestamps[k] = None
+        for k in timestamps:
+            timestamps[k] = None
         # Enviar el YAW CORREGIDO en la respuesta
         return {"status": "wrong_direction", "yaw": round(yaw_corrected, 2)}
 
@@ -271,9 +389,12 @@ async def analyze_frame(file: Optional[UploadFile] = File(None), imagen: Optiona
     if current_pose != pose:
         current_pose = pose
         timestamps[pose] = now
-        return {"status": "waiting", "pose": pose, "message": f"Mantén {pose} {HOLD_TIME}s"}
+        return {
+            "status": "waiting",
+            "pose": pose,
+            "message": f"Mantén {pose} {HOLD_TIME}s",
+        }
 
-    # VERIFICAR TIEMPO DE MANTENIMIENTO
     elapsed = now - (timestamps[pose] or now)
     if elapsed >= HOLD_TIME:
         vec = _get_face_vector(img)
@@ -282,24 +403,31 @@ async def analyze_frame(file: Optional[UploadFile] = File(None), imagen: Optiona
         progress[pose] = _to_list(vec)
         current_pose = None
         timestamps[pose] = None
-        print(f"Pose {pose} capturada exitosamente. Vector length: {len(progress[pose])}")
+        print(
+            f"Pose {pose} capturada exitosamente. Vector length: {len(progress[pose])}"
+        )
         return {"status": "captured", "pose": pose, "vector": progress[pose]}
     else:
-        return {"status": "waiting", "pose": pose, "elapsed": round(elapsed,2)}
+        return {"status": "waiting", "pose": pose, "elapsed": round(elapsed, 2)}
+
 
 @app.get("/progress")
 def get_progress():
-    done = sum(1 for k in ["front","up","down"] if progress[k] is not None)
-    return {"progress": done/3, "vectors": progress}
+    done = sum(1 for k in ["front", "up", "down"] if progress[k] is not None)
+    return {"progress": done / 3, "vectors": progress}
+
 
 @app.post("/reset")
 def reset():
     global current_pose
-    for k in list(progress.keys()): progress[k] = None
-    for k in list(timestamps.keys()): timestamps[k] = None
+    for k in list(progress.keys()):
+        progress[k] = None
+    for k in list(timestamps.keys()):
+        timestamps[k] = None
     current_pose = None
     print("Estado del servicio reseteado completamente")
     return {"status": "reset_ok"}
+
 
 @app.post("/reset_pose")
 def reset_pose(pose: str = Form(...)):
@@ -315,6 +443,7 @@ def reset_pose(pose: str = Form(...)):
     else:
         return JSONResponse(content={"status": "invalid_pose"}, status_code=400)
 
+
 @app.get("/debug_state")
 def debug_state():
     """Endpoint para debug del estado actual"""
@@ -324,60 +453,68 @@ def debug_state():
             vector_info[k] = f"length: {len(v)}"
         else:
             vector_info[k] = "None"
-    
+
     return {
         "current_pose": current_pose,
         "progress": vector_info,
         "timestamps": timestamps,
-        "hold_time": HOLD_TIME
+        "hold_time": HOLD_TIME,
     }
+
 
 # ----------------- Finalizar registro (persiste vector del usuario) -----------------
 @app.post("/finalize_registration")
-async def finalize_registration(user_id: str = Form(...)):
+async def finalize_registration(usuarioID: str = Form(...)):
     # Verificar que tengamos 3 vectores capturados y que no estén vacíos
     vectors_present = {}
-    for k in ("front","up","down"):
+    for k in ("front", "up", "down"):
         vectors_present[k] = progress[k] is not None and len(progress[k]) == 128
         print(f"Pose {k}: {'VÁLIDA' if vectors_present[k] else 'INVÁLIDA'}")
 
     if not all(vectors_present.values()):
         missing = [k for k, v in vectors_present.items() if not v]
         return JSONResponse(
-            content={"status": "incomplete", "missing": missing}, 
-            status_code=400
+            content={"status": "incomplete", "missing": missing}, status_code=400
         )
 
     v_front = np.array(progress["front"], dtype=np.float32)
-    v_up    = np.array(progress["up"], dtype=np.float32)
-    v_down  = np.array(progress["down"], dtype=np.float32)
+    v_up = np.array(progress["up"], dtype=np.float32)
+    v_down = np.array(progress["down"], dtype=np.float32)
 
     # Promedio de vectores normalizados (robusto a pequeñas variaciones)
     mean_vec = _normalize(_normalize(v_front) + _normalize(v_up) + _normalize(v_down))
-    _save_user_vector(user_id, _to_list(mean_vec))
+    await save_user_vector(app, usuarioID, _to_list(mean_vec))
 
     # Limpia progreso en memoria para el siguiente usuario
-    for k in list(progress.keys()): progress[k] = None
-    for k in list(timestamps.keys()): timestamps[k] = None
+    for k in list(progress.keys()):
+        progress[k] = None
+    for k in list(timestamps.keys()):
+        timestamps[k] = None
     current_pose = None
 
-    print(f"Registro finalizado para usuario {user_id}")
-    return {"status": "saved", "user_id": user_id}
+    print(f"Registro finalizado para usuario {usuarioID}")
+    return {"status": "saved", "usuarioID": usuarioID}
+
 
 # ----------------- Verificación (comparar contra usuario guardado) -----------------
 THRESHOLD = 0.58  # ajusta según pruebas (0.45-0.6 típico HOG)
 
+
 @app.post("/verify_frame")
-async def verify_frame(user_id: str = Form(...), file: Optional[UploadFile] = File(None), imagen: Optional[UploadFile] = File(None)):
+async def verify_frame(
+    usuarioID: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    imagen: Optional[UploadFile] = File(None),
+):
     """Verificación biométrica con mejor manejo de errores"""
     try:
-        print(f"=== INICIO VERIFICACIÓN PARA USUARIO {user_id} ===")
-        
+        print(f"=== INICIO VERIFICACIÓN PARA USUARIO {usuarioID} ===")
+
         upload = file or imagen
         if upload is None:
             print("Error: No se recibió archivo")
             return JSONResponse(content={"status": "no_file"}, status_code=400)
-        
+
         contenido = await upload.read()
         if not contenido:
             print("Error: Archivo vacío")
@@ -385,11 +522,12 @@ async def verify_frame(user_id: str = Form(...), file: Optional[UploadFile] = Fi
 
         # Cargar vector de referencia
         print("Cargando vector de referencia...")
-        ref = _load_user_vector(user_id)
+        ref = await load_user_vector(app, usuarioID)
         if ref is None:
-            print(f"No se encontró vector para usuario {user_id}")
+            print(f"No se encontró vector para usuario {usuarioID}")
             # Listar archivos disponibles para debug
             import glob, os
+
             files = glob.glob(os.path.join(DATA_DIR, "*.json"))
             print(f"Archivos disponibles: {[os.path.basename(f) for f in files]}")
             return JSONResponse(content={"status": "no_reference"}, status_code=404)
@@ -407,102 +545,117 @@ async def verify_frame(user_id: str = Form(...), file: Optional[UploadFile] = Fi
             return {"status": "no_face"}
 
         # Calcular distancia
-        dist = float(face_recognition.face_distance([np.array(ref, dtype=np.float32)], vec)[0])
+        dist = float(
+            face_recognition.face_distance([np.array(ref, dtype=np.float32)], vec)[0]
+        )
         match = bool(dist < THRESHOLD)
-        
+
         print(f"Verificación completada. Distancia: {dist:.4f}, Match: {match}")
-        
+
         return {
-            "status": "ok", 
-            "user_id": user_id, 
-            "distance": dist, 
-            "threshold": THRESHOLD, 
-            "match": match
+            "status": "ok",
+            "usuarioID": usuarioID,
+            "distance": dist,
+            "threshold": THRESHOLD,
+            "match": match,
         }
-        
+
     except Exception as e:
         print(f"Error en verificación: {str(e)}")
         return JSONResponse(
-            content={"status": "error", "message": str(e)},
-            status_code=500
+            content={"status": "error", "message": str(e)}, status_code=500
         )
+
 
 # ----------------- Gestión de usuarios -----------------
 @app.get("/users")
-def list_users():
-    import glob, os, json
-    files = glob.glob(os.path.join(DATA_DIR, "*.json"))
-    return [{"user_id": os.path.splitext(os.path.basename(p))[0]} for p in files]
+async def list_users():
+    col = getattr(app.state, "mongo_col", None)
+    if col is None:
+        import glob, os
 
-@app.get("/users/{user_id}")
-def get_user(user_id: str):
-    import os, json
-    path = os.path.join(DATA_DIR, f"{user_id}.json")
-    if not os.path.exists(path):
+        files = glob.glob(os.path.join(DATA_DIR, "*.json"))
+        return [{"usuarioID": os.path.splitext(os.path.basename(p))[0]} for p in files]
+    cursor = col.find({}, {"_id": 0, "usuarioID": 1})
+    users = []
+    async for doc in cursor:
+        users.append({"usuarioID": doc["usuarioID"]})
+    return users
+
+
+@app.get("/users/{usuarioID}")
+async def get_user(usuarioID: str):
+    col = getattr(app.state, "mongo_col", None)
+    if col is None:
+        import os, json
+
+        path = os.path.join(DATA_DIR, f"{usuarioID}.json")
+        if not os.path.exists(path):
+            return JSONResponse(content={"status": "not_found"}, status_code=404)
+        return json.load(open(path, "r", encoding="utf-8"))
+
+    doc = await col.find_one({"usuarioID": usuarioID}, {"_id": 0})
+    if not doc:
         return JSONResponse(content={"status": "not_found"}, status_code=404)
-    return json.load(open(path, "r", encoding="utf-8"))
+    return doc
+
 
 # ----------------- Endpoints de sistema -----------------
 @app.get("/")
 def root():
     return {"status": "ok", "service": "face_recognition_api"}
 
+
 @app.get("/health")
 def health_check():
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "timestamp": time.time(),
         "current_pose": current_pose,
-        "poses_captured": sum(1 for k in progress if progress[k] is not None)
+        "poses_captured": sum(1 for k in progress if progress[k] is not None),
     }
 
+
 @app.post("/save_vector")
-async def save_vector(user_id: str = Form(...), vector: str = Form(...)):
+async def save_vector(usuarioID: str = Form(...), vector: str = Form(...)):
     """Endpoint para guardar un vector directamente desde NestJS"""
     try:
-        print(f"=== GUARDANDO VECTOR PARA USUARIO {user_id} ===")
-        
-        # Convertir el string JSON a lista de floats
+        print(f"=== GUARDANDO VECTOR PARA USUARIO {usuarioID} ===")
+
         vector_list = json.loads(vector)
         print(f"Vector recibido. Longitud: {len(vector_list)}")
-        
-        # Validar que sea un vector válido
+
         if not isinstance(vector_list, list) or len(vector_list) != 128:
             return JSONResponse(
                 content={"status": "error", "message": "Vector inválido"},
-                status_code=400
+                status_code=400,
             )
-        
-        # Guardar el vector
-        _save_user_vector(user_id, vector_list)
-        print(f"Vector guardado exitosamente para usuario {user_id}")
-        
-        return {"status": "saved", "user_id": user_id}
-        
+
+        await save_user_vector(app, usuarioID, vector_list)
+        print(f"Vector guardado exitosamente para usuario {usuarioID}")
+
+        return {"status": "saved", "usuarioID": usuarioID}
+
     except json.JSONDecodeError:
         return JSONResponse(
             content={"status": "error", "message": "Vector en formato JSON inválido"},
-            status_code=400
+            status_code=400,
         )
     except Exception as e:
         print(f"Error al guardar vector: {str(e)}")
         return JSONResponse(
-            content={"status": "error", "message": str(e)},
-            status_code=500
+            content={"status": "error", "message": str(e)}, status_code=500
         )
 
-@app.get("/check_user/{user_id}")
-def check_user(user_id: str):
+
+@app.get("/check_user/{usuarioID}")
+async def check_user(usuarioID: str):
     """Endpoint para verificar si un usuario tiene vector guardado"""
-    vector = _load_user_vector(user_id)
+    vector = await load_user_vector(app, usuarioID)
     if vector is None:
         return {"exists": False, "message": "Usuario no encontrado"}
-    
-    return {
-        "exists": True, 
-        "user_id": user_id, 
-        "vector_length": len(vector) if vector else 0
-    }
+    return {"exists": True, "usuarioID": usuarioID, "vector_length": len(vector)}
+
 
 @app.post("/debug_pose")
 async def debug_pose(file: UploadFile = File(...)):
@@ -510,53 +663,53 @@ async def debug_pose(file: UploadFile = File(...)):
     try:
         contenido = await file.read()
         print("=== MODO DIAGNÓSTICO ===")
-        
+
         img = _load_image_as_bgr_from_bytes(contenido)
         if img is None:
             return {"error": "No se pudo decodificar la imagen"}
-            
+
         print(f" Imagen decodificada: {img.shape}")
-        
+
         # Procesar imagen original
         pitch1, yaw1 = _estimate_pitch_yaw(img)
-        
+
         # Procesar imagen volteada
         img_flipped = cv2.flip(img, 1)
         pitch2, yaw2 = _estimate_pitch_yaw(img_flipped)
-        
+
         # Clasificar poses
         pose1 = _classify_pose(pitch1, yaw1) if pitch1 is not None else None
         pose2 = _classify_pose(pitch2, yaw2) if pitch2 is not None else None
-        
+
         # Verificar detección de vector facial
         vec_original = _get_face_vector(img)
         vec_flipped = _get_face_vector(img_flipped)
-        
+
         return {
             "original": {
-                "pitch": pitch1, 
-                "yaw": yaw1, 
+                "pitch": pitch1,
+                "yaw": yaw1,
                 "pose": pose1,
-                "vector_detected": vec_original is not None
+                "vector_detected": vec_original is not None,
             },
             "flipped": {
-                "pitch": pitch2, 
-                "yaw": yaw2, 
+                "pitch": pitch2,
+                "yaw": yaw2,
                 "pose": pose2,
-                "vector_detected": vec_flipped is not None
+                "vector_detected": vec_flipped is not None,
             },
             "current_service_state": {
                 "current_pose": current_pose,
-                "progress": {k: v is not None for k, v in progress.items()}
-            }
+                "progress": {k: v is not None for k, v in progress.items()},
+            },
         }
-        
+
     except Exception as e:
         print(f" Error en debug_pose: {str(e)}")
         return {"error": str(e)}
-    
-    
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

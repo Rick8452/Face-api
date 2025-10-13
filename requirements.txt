@@ -4,6 +4,7 @@ numpy
 opencv-python-headless
 Pillow>=9.5,<12
 python-multipart
+motor>=3.5
 # --- biometría ---
 dlib
 face-recognition
