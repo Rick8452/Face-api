@@ -23,7 +23,7 @@ async def init_mongo(app: FastAPI):
 
     await col.create_index("usuarioID", unique=True)
     app.state.mongo_col = col
-    print(f"[Mongo] Conectado: {uri} (db={dbname}, col={colname})")
+    print(f"[Mongo] Conectado: {uri} )")
 
 
 async def close_mongo():
