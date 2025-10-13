@@ -9,8 +9,8 @@ mongo_client = None
 async def init_mongo(app: FastAPI):
 
     uri = os.getenv("MONGO_URI")
-    dbname = os.getenv("MONGO_DB", "face")
-    colname = os.getenv("MONGO_COL", "users")
+    # dbname = os.getenv("MONGO_DB", "te")
+    # colname = os.getenv("MONGO_COL", "users")
 
     if not uri:
         print("[Mongo] MONGO_URI no definido. Modo archivos activo.")
@@ -18,8 +18,8 @@ async def init_mongo(app: FastAPI):
 
     global mongo_client
     mongo_client = AsyncIOMotorClient(uri, uuidRepresentation="standard")
-    db = mongo_client[dbname]
-    col = db[colname]
+    db = mongo_client["test"]
+    col = db["users"]
 
     await col.create_index("usuarioID", unique=True)
     app.state.mongo_col = col
