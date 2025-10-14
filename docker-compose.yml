@@ -17,6 +17,7 @@ services:
     restart: unless-stopped
     networks:
       - app-network
+    platform: linux/amd64
 
   mongo:
     image: mongo:6
@@ -32,6 +33,7 @@ services:
     restart: unless-stopped
     networks:
       - app-network
+    platform: linux/amd64
 
   mongo-express:
     image: mongo-express:1
@@ -48,6 +50,7 @@ services:
     restart: unless-stopped
     networks:
       - app-network
+    platform: linux/amd64
 
 volumes:
   mongo-data:

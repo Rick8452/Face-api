@@ -12,7 +12,7 @@ COPY environment.yml /app/
 RUN conda env create -f /app/environment.yml && conda clean -afy
 # Asegura que el PATH use el entorno "fr"
 SHELL ["bash", "-lc"]
-RUN echo "conda activate fr" >> ~/.bashrc
+#RUN echo "conda activate fr" >> ~/.bashrc
 ENV PATH /opt/conda/envs/fr/bin:$PATH
 # Copia tu app
 COPY . /app

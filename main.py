@@ -32,40 +32,23 @@ current_pose = None
 HOLD_TIME = 2  # s
 
 # ----------------- Carpeta para vectores persistentes -----------------
-DATA_DIR = "data/users"
-os.makedirs(DATA_DIR, exist_ok=True)
 
 
 async def save_user_vector(app: FastAPI, usuarioID: str, vector: list[float]):
     col = getattr(app.state, "mongo_col", None)
     if col is None:
-        _save_user_vector(usuarioID, vector)
-        return
-
+        raise RuntimeError("Mongo no inicializado. Define MONGO_URI.")
     await col.update_one(
         {"usuarioID": usuarioID},
         {"$set": {"usuarioID": usuarioID, "vector": vector}},
         upsert=True,
     )
 
-    path = os.path.join(DATA_DIR, f"{usuarioID}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"usuarioID": usuarioID, "vector": vector}, f, ensure_ascii=False)
 
-
-async def _load_user_vector(app: FastAPI, usuarioID: str) -> Optional[list[float]]:
-
-    path = os.path.join(DATA_DIR, f"{usuarioID}.json")
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        return data.get("vector")
-
+async def load_user_vector(app: FastAPI, usuarioID: str) -> Optional[list[float]]:
     col = getattr(app.state, "mongo_col", None)
     if col is None:
-        return _load_user_vector(usuarioID)
-
+        raise RuntimeError("Mongo no inicializado. Define MONGO_URI.")
     doc = await col.find_one({"usuarioID": usuarioID}, {"_id": 0, "vector": 1})
     return (doc or {}).get("vector")
 
@@ -222,54 +205,6 @@ def _correct_yaw_angle(yaw: float) -> float:
     return yaw_normalized
 
 
-# --- helpers de archivos (fallback) ---
-def _save_user_vector_file(
-    usuarioID: str, vector: list[float], data_dir: str = DATA_DIR
-):
-    path = os.path.join(data_dir, f"{usuarioID}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"usuarioID": usuarioID, "vector": vector}, f, ensure_ascii=False)
-
-
-def _load_user_vector_file(
-    usuarioID: str, data_dir: str = DATA_DIR
-) -> Optional[list[float]]:
-    path = os.path.join(data_dir, f"{usuarioID}.json")
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("vector")
-
-
-# --- helpers Mongo con fallback a archivos ---
-async def save_user_vector(app: FastAPI, usuarioID: str, vector: list[float]):
-    col = getattr(app.state, "mongo_col", None)
-    if col is not None:
-        await col.update_one(
-            {"usuarioID": usuarioID},
-            {"$set": {"usuarioID": usuarioID, "vector": vector}},
-            upsert=True,
-        )
-        # Si quieres DUAL-write (opcional), descomenta:
-        # _save_user_vector_file(usuarioID, vector)
-        return
-    # Fallback a archivos
-    _save_user_vector_file(usuarioID, vector)
-
-
-async def load_user_vector(app: FastAPI, usuarioID: str) -> Optional[list[float]]:
-    col = getattr(app.state, "mongo_col", None)
-    if col is not None:
-        doc = await col.find_one({"usuarioID": usuarioID}, {"_id": 0, "vector": 1})
-        if doc and "vector" in doc:
-            return doc["vector"]
-        # si no está en Mongo, intenta archivo como último recurso
-        return _load_user_vector_file(usuarioID)
-    # Fallback a archivos
-    return _load_user_vector_file(usuarioID)
-
-
 def _classify_pose(pitch: float, yaw: float) -> str | None:
     print(f" Clasificando pose - Pitch: {pitch:.2f}, Yaw: {yaw:.2f}")
 
@@ -277,9 +212,7 @@ def _classify_pose(pitch: float, yaw: float) -> str | None:
     print(f" Yaw original: {yaw:.2f}°, Yaw corregido: {yaw_corrected:.2f}°")
 
     YAW_THRESHOLD = 25
-    PITCH_THRESHOLD = 15
-    PITCH_THRESHOLD_UP = -15  # <= -15  → up
-    PITCH_THRESHOLD_DOWN = 15  # >= +15  → down
+    PITCH_THRESHOLD = 8
 
     is_tilt_pose = abs(pitch) >= PITCH_THRESHOLD
     yaw_threshold = YAW_THRESHOLD * (1.5 if is_tilt_pose else 1)
@@ -290,11 +223,11 @@ def _classify_pose(pitch: float, yaw: float) -> str | None:
         )
         return None
 
-    if pitch <= PITCH_THRESHOLD_UP:
+    if pitch <= -PITCH_THRESHOLD:
         print(" Pose clasificada: up")
         return "up"
 
-    if pitch >= PITCH_THRESHOLD_DOWN:
+    if pitch >= PITCH_THRESHOLD:
         print(" Pose clasificada: down")
         return "down"
 
@@ -506,51 +439,39 @@ async def verify_frame(
     file: Optional[UploadFile] = File(None),
     imagen: Optional[UploadFile] = File(None),
 ):
-    """Verificación biométrica con mejor manejo de errores"""
+    """Verificación biométrica"""
     try:
         print(f"=== INICIO VERIFICACIÓN PARA USUARIO {usuarioID} ===")
 
+        # 1) cargar vector de referencia (Mongo)
+        ref = await load_user_vector(app, usuarioID)
+        if ref is None:
+            return JSONResponse(content={"status": "no_reference"}, status_code=404)
+
+        # 2) leer imagen subida (file|imagen)
         upload = file or imagen
         if upload is None:
-            print("Error: No se recibió archivo")
             return JSONResponse(content={"status": "no_file"}, status_code=400)
 
         contenido = await upload.read()
         if not contenido:
-            print("Error: Archivo vacío")
             return JSONResponse(content={"status": "no_file"}, status_code=400)
 
-        # Cargar vector de referencia
-        print("Cargando vector de referencia...")
-        ref = await load_user_vector(app, usuarioID)
-        if ref is None:
-            print(f"No se encontró vector para usuario {usuarioID}")
-            # Listar archivos disponibles para debug
-            import glob, os
-
-            files = glob.glob(os.path.join(DATA_DIR, "*.json"))
-            print(f"Archivos disponibles: {[os.path.basename(f) for f in files]}")
-            return JSONResponse(content={"status": "no_reference"}, status_code=404)
-
-        print("Vector de referencia cargado exitosamente")
-
+        # 3) decodificar + extraer encoding
         img = _load_image_as_bgr_from_bytes(contenido)
         if img is None:
-            print("Error: No se pudo decodificar la imagen")
             return JSONResponse(content={"status": "bad_image"}, status_code=400)
 
         vec = _get_face_vector(img)
         if vec is None:
-            print("Error: No se pudo extraer vector facial de la imagen")
             return {"status": "no_face"}
 
-        # Calcular distancia
+        # 4) comparar
         dist = float(
             face_recognition.face_distance([np.array(ref, dtype=np.float32)], vec)[0]
         )
         match = bool(dist < THRESHOLD)
-
-        print(f"Verificación completada. Distancia: {dist:.4f}, Match: {match}")
+        print(f"Verificación: dist={dist:.4f}, match={match}")
 
         return {
             "status": "ok",
@@ -572,10 +493,7 @@ async def verify_frame(
 async def list_users():
     col = getattr(app.state, "mongo_col", None)
     if col is None:
-        import glob, os
-
-        files = glob.glob(os.path.join(DATA_DIR, "*.json"))
-        return [{"usuarioID": os.path.splitext(os.path.basename(p))[0]} for p in files]
+        return JSONResponse(content={"status": "mongo_disabled"}, status_code=503)
     cursor = col.find({}, {"_id": 0, "usuarioID": 1})
     users = []
     async for doc in cursor:
@@ -586,14 +504,6 @@ async def list_users():
 @app.get("/users/{usuarioID}")
 async def get_user(usuarioID: str):
     col = getattr(app.state, "mongo_col", None)
-    if col is None:
-        import os, json
-
-        path = os.path.join(DATA_DIR, f"{usuarioID}.json")
-        if not os.path.exists(path):
-            return JSONResponse(content={"status": "not_found"}, status_code=404)
-        return json.load(open(path, "r", encoding="utf-8"))
-
     doc = await col.find_one({"usuarioID": usuarioID}, {"_id": 0})
     if not doc:
         return JSONResponse(content={"status": "not_found"}, status_code=404)
@@ -614,38 +524,6 @@ def health_check():
         "current_pose": current_pose,
         "poses_captured": sum(1 for k in progress if progress[k] is not None),
     }
-
-
-@app.post("/save_vector")
-async def save_vector(usuarioID: str = Form(...), vector: str = Form(...)):
-    """Endpoint para guardar un vector directamente desde NestJS"""
-    try:
-        print(f"=== GUARDANDO VECTOR PARA USUARIO {usuarioID} ===")
-
-        vector_list = json.loads(vector)
-        print(f"Vector recibido. Longitud: {len(vector_list)}")
-
-        if not isinstance(vector_list, list) or len(vector_list) != 128:
-            return JSONResponse(
-                content={"status": "error", "message": "Vector inválido"},
-                status_code=400,
-            )
-
-        await save_user_vector(app, usuarioID, vector_list)
-        print(f"Vector guardado exitosamente para usuario {usuarioID}")
-
-        return {"status": "saved", "usuarioID": usuarioID}
-
-    except json.JSONDecodeError:
-        return JSONResponse(
-            content={"status": "error", "message": "Vector en formato JSON inválido"},
-            status_code=400,
-        )
-    except Exception as e:
-        print(f"Error al guardar vector: {str(e)}")
-        return JSONResponse(
-            content={"status": "error", "message": str(e)}, status_code=500
-        )
 
 
 @app.get("/check_user/{usuarioID}")
